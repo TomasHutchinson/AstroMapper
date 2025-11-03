@@ -90,6 +90,36 @@ class Planet:
                 # self.position_cartesian keeps its default (0,0,0).
                 pass
 
+            self.color = (1.0, 1.0, 1.0)
+
+            if self.host_spectral_type:
+                # Rough color based on stellar spectral type
+                t = self.host_spectral_type.upper()[0]
+                spectral_colors = {
+                    'O': (0.6, 0.8, 1.0),  # blue
+                    'B': (0.7, 0.8, 1.0),
+                    'A': (0.8, 0.8, 1.0),
+                    'F': (1.0, 1.0, 0.9),
+                    'G': (1.0, 1.0, 0.7),
+                    'K': (1.0, 0.9, 0.6),
+                    'M': (1.0, 0.7, 0.5),  # red/orange
+                }
+                self.color = spectral_colors.get(t, (1.0, 1.0, 1.0))
+
+            elif self.discovery_method:
+                # Color by discovery method if no spectral type
+                method_colors = {
+                    'Transit': (0.4, 0.7, 1.0),
+                    'Radial Velocity': (1.0, 0.4, 0.4),
+                    'Imaging': (0.5, 1.0, 0.5),
+                    'Microlensing': (1.0, 0.8, 0.4),
+                    'Astrometry': (1.0, 1.0, 0.4),
+                }
+                for key, col in method_colors.items():
+                    if key.lower() in self.discovery_method.lower():
+                        self.color = col
+                        break
+
         elif len(row) > 0:
             # Handle error if a row is provided but its length is wrong
             print(f"Error: Row length ({len(row)}) does not match expected column length ({len(self.COLUMN_MAP)}).")
@@ -104,4 +134,7 @@ class Planet:
         else:
             return "<Planet: Uninitialized>"
 
-planets = [Planet(row=i) for i in rows]
+planets = [
+    p for p in (Planet(row=i) for i in rows)
+    if p.position_cartesian not in ((0, 0, 0), None)
+]
