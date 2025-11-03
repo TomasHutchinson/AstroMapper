@@ -3,18 +3,17 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 import numpy as np
 
-# --- NEW IMPORTS ---
-from data import rows, fields
-from body import Planet  # assuming Planet is in planet.py (adjust if needed)
 
-# Generate planet objects and extract 3D coordinates
+from data import rows, fields
+from body import Planet
+from images import load_texture
+
+
 planets = [Planet(row=i) for i in rows]
 points = np.array([p.position_cartesian for p in planets], dtype=np.float32)
 colors = np.array([p.color for p in planets], dtype=np.float32)
 
-# -----------------------------
-# Camera class (manual)
-# -----------------------------
+
 class Camera:
     def __init__(self, position, yaw=0.0, pitch=0.0, speed=0.01, sensitivity=0.5):
         self.position = np.array(position, dtype=np.float32)
@@ -65,9 +64,7 @@ class Camera:
         glTranslatef(-self.position[0], -self.position[1], -self.position[2])
 
 
-# -----------------------------
-# Frustum + helpers
-# -----------------------------
+
 frustum_planes = []
 
 def extract_frustum_planes():
@@ -129,11 +126,9 @@ def points_near_camera(points, camera_position, max_distance):
     return d2 < max_dist2
 
 
-# -----------------------------
-# OpenGL Drawing Helpers
-# -----------------------------
 def draw_point_cloud(pts, cols=None):
     glEnableClientState(GL_VERTEX_ARRAY)
+    glDisable(GL_TEXTURE_2D)
     glEnable(GL_POINT_SMOOTH)
     glVertexPointerf(pts)
     glPointSize(3)
@@ -149,6 +144,7 @@ def draw_point_cloud(pts, cols=None):
         glDisableClientState(GL_COLOR_ARRAY)
 
 def draw_axes(size=1.0):
+    glDisable(GL_TEXTURE_2D)
     glBegin(GL_LINES)
     glColor3f(1,0,0); glVertex3f(0,0,0); glVertex3f(size,0,0)
     glColor3f(0,1,0); glVertex3f(0,0,0); glVertex3f(0,size,0)
@@ -164,46 +160,75 @@ def init_opengl():
     gluPerspective(90, 800/600, 0.1, 50000.0)
     glMatrixMode(GL_MODELVIEW)
 
-def create_sphere(radius=1.0, lat_steps=16, lon_steps=32):
+def create_sphere(radius=1.0, lat_steps=16, lon_steps=32, pole_epsilon=1e-6):
     vertices = []
-    indices = []
+    normals  = []
+    tex      = []
+    indices  = []
+
 
     for i in range(lat_steps + 1):
         theta = np.pi * i / lat_steps
-        sin_theta = np.sin(theta)
-        cos_theta = np.cos(theta)
+
+        theta_clamped = np.clip(theta, pole_epsilon, np.pi - pole_epsilon)
+
+        sin_t = np.sin(theta_clamped)
+        cos_t = np.cos(theta_clamped)
+
+        lat = np.pi/2 - theta_clamped
+
         for j in range(lon_steps + 1):
-            phi = 2 * np.pi * j / lon_steps
-            sin_phi = np.sin(phi)
-            cos_phi = np.cos(phi)
-            x = radius * sin_theta * cos_phi
-            y = radius * cos_theta
-            z = radius * sin_theta * sin_phi
+            phi = 2.0 * np.pi * j / lon_steps 
+
+            sin_p = np.sin(phi)
+            cos_p = np.cos(phi)
+
+            x = radius * sin_t * cos_p
+            y = radius * cos_t
+            z = radius * sin_t * sin_p
+
             vertices.append([x, y, z])
 
+            normals.append([sin_t * cos_p, cos_t, sin_t * sin_p])
+
+            v_merc = 0.5 - (np.log(np.tan(np.pi/4 + lat/2.0)) / (2.0 * np.pi))
+            v_merc = float(np.clip(1.0 - v_merc, 0.0, 1.0))
+
+            u = 1.0 - (phi / (2.0 * np.pi))
+            if u < 0.0: u += 1.0
+            if u > 1.0: u -= 1.0
+
+            tex.append([u, v_merc])
+
     vertices = np.array(vertices, dtype=np.float32)
+    normals  = np.array(normals, dtype=np.float32)
+    tex      = np.array(tex, dtype=np.float32)
+
+    # build triangle indices (two triangles per quad)
     for i in range(lat_steps):
         for j in range(lon_steps):
-            first = i * (lon_steps + 1) + j
-            second = first + lon_steps + 1
+            first  = i * (lon_steps + 1) + j
+            second = first + (lon_steps + 1)
             indices.append([first, second, first + 1])
             indices.append([second, second + 1, first + 1])
     indices = np.array(indices, dtype=np.uint32)
+
 
     list_id = glGenLists(1)
     glNewList(list_id, GL_COMPILE)
     glBegin(GL_TRIANGLES)
     for tri in indices:
         for idx in tri:
+            glNormal3fv(normals[idx])
+            glTexCoord2fv(tex[idx])
             glVertex3fv(vertices[idx])
     glEnd()
     glEndList()
+
     return list_id
 
 
-# -----------------------------
-# Main Render Loop
-# -----------------------------
+
 def main():
     global points
     pygame.init()
@@ -214,6 +239,9 @@ def main():
 
     points = np.array(points, dtype=np.float32).reshape(-1,3)
     sphere_mesh = create_sphere(0.05, 8, 16)
+
+    glEnable(GL_TEXTURE_2D)
+    sphere_tex = load_texture("earth.jpg")
 
     minp, maxp = points.min(0), points.max(0)
     center = (0,0,0)
@@ -250,6 +278,8 @@ def main():
         last_x, last_y = mouse_x, mouse_y
 
         if scroll_delta != 0:
+            if keys[pygame.K_LCTRL]:
+                scroll_delta *= 0.25
             cam.scroll_toward_mouse(scroll_delta, mouse_x, mouse_y, 800, 600)
 
         cam.move(keys, dt)
@@ -266,12 +296,14 @@ def main():
         mask_near = points_near_camera(points, cam.position, 50.0)
         mask_to_draw_mesh = mask & mask_near
 
-        # Limit to a max number of meshes drawn
+
         visible_indices = np.where(mask_to_draw_mesh)[0]
-        max_meshes = 2000
+        max_meshes = 500
         if len(visible_indices) > max_meshes:
             visible_indices = visible_indices[:max_meshes]
 
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, sphere_tex)
         for i in visible_indices:
             p = points[i]
             glPushMatrix()
