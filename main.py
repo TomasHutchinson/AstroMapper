@@ -7,6 +7,7 @@ import numpy as np
 from data import rows, fields
 from body import Planet
 from images import load_texture
+import hud
 
 
 planets = [Planet(row=i) for i in rows]
@@ -15,12 +16,13 @@ colors = np.array([p.color for p in planets], dtype=np.float32)
 
 
 class Camera:
-    def __init__(self, position, yaw=0.0, pitch=0.0, speed=0.01, sensitivity=0.5):
+    def __init__(self, position, yaw=0.0, pitch=0.0, speed=0.01, sensitivity=0.5, rotation_speed=0.1):
         self.position = np.array(position, dtype=np.float32)
         self.yaw = yaw
         self.pitch = pitch
         self.speed = speed
         self.sensitivity = sensitivity
+        self.rotation_speed = rotation_speed
 
     def move(self, keys, dt):
         v = self.speed * dt
@@ -31,9 +33,11 @@ class Camera:
         if keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL]:
             v *= 10.0
         if keys[pygame.K_SPACE]:
-            v *= 10.0
+            v /= 10.0
         if keys[pygame.K_LALT]:
-            v *= 10.0
+            v *= min(np.linalg.norm(self.position) + 1.0, 1000)
+
+        if keys[pygame.K_r]: self.position = (0,0,0)
 
         yaw_r = np.radians(self.yaw)
         forward = np.array([np.sin(yaw_r), 0, -np.cos(yaw_r)], dtype=np.float32)
@@ -46,6 +50,14 @@ class Camera:
         if keys[pygame.K_d]: self.position += right * v
         if keys[pygame.K_q]: self.position -= up * v
         if keys[pygame.K_e]: self.position += up * v
+
+        rx, ry = 0,0
+        if keys[pygame.K_UP]: ry += self.rotation_speed
+        if keys[pygame.K_DOWN]: ry += -self.rotation_speed
+        if keys[pygame.K_LEFT]: rx += -self.rotation_speed
+        if keys[pygame.K_RIGHT]: rx += self.rotation_speed
+        self.rotate(rx * dt,ry * dt)
+
 
     def rotate(self, dx, dy):
         self.yaw += dx * self.sensitivity
@@ -157,7 +169,7 @@ def init_opengl():
     glClearColor(0,0,0,1)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(90, 800/600, 0.1, 50000.0)
+    gluPerspective(90, 800/600, 0.05, 5000.0)
     glMatrixMode(GL_MODELVIEW)
 
 def create_sphere(radius=1.0, lat_steps=16, lon_steps=32, pole_epsilon=1e-6):
@@ -227,6 +239,11 @@ def create_sphere(radius=1.0, lat_steps=16, lon_steps=32, pole_epsilon=1e-6):
 
     return list_id
 
+def world_to_screen(x, y, z, modelview, projection, viewport):
+    winX, winY, winZ = gluProject(x, y, z, modelview, projection, viewport)
+    # Flip Y to match Pygame’s coordinate system (top-left origin)
+    winY = viewport[3] - winY
+    return winX, winY, winZ
 
 
 def main():
@@ -280,10 +297,13 @@ def main():
         if scroll_delta != 0:
             if keys[pygame.K_LCTRL]:
                 scroll_delta *= 0.25
+            if keys[pygame.K_LALT]:
+                scroll_delta /= 10.0
             cam.scroll_toward_mouse(scroll_delta, mouse_x, mouse_y, 800, 600)
 
         cam.move(keys, dt)
-        cam.rotate(mouse_dx, mouse_dy)
+        cam.rotate(-mouse_dx, mouse_dy)
+        
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
@@ -298,9 +318,22 @@ def main():
 
 
         visible_indices = np.where(mask_to_draw_mesh)[0]
+
         max_meshes = 500
-        if len(visible_indices) > max_meshes:
-            visible_indices = visible_indices[:max_meshes]
+        num_visible = len(visible_indices)
+
+        if num_visible > max_meshes:
+            diffs = points[visible_indices] - cam.position
+            dists2 = np.einsum('ij,ij->i', diffs, diffs)
+
+            closest_idx_unsorted = np.argpartition(dists2, max_meshes)[:max_meshes]
+
+            closest_dists2 = dists2[closest_idx_unsorted]
+            sort_order = np.argsort(closest_dists2)
+
+            visible_indices = visible_indices[closest_idx_unsorted[sort_order]]
+
+        closest_planet = planets[closest_idx_unsorted[sort_order][0]]
 
         glEnable(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, sphere_tex)
@@ -313,6 +346,42 @@ def main():
             glPopMatrix()
 
         draw_axes(diag * 0.2)
+
+
+
+        ##### HUD, no more openGL after here #####
+        UI = False
+        if UI:
+            glDisable(GL_DEPTH_TEST)
+            glDisable(GL_TEXTURE_2D)
+
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            viewport = glGetIntegerv(GL_VIEWPORT)
+
+            font = pygame.font.SysFont(None, 16, bold=False)
+            label_offset = np.array([0, 0.08, 0], dtype=np.float32)
+
+            for i in visible_indices[:100]:
+                planet = planets[i]
+                pos = points[i]
+
+    
+                label_pos = pos + label_offset
+                try:
+                    x, y, z = gluProject(*label_pos, modelview, projection, viewport)
+                except:
+                    continue
+                if z < 0.0 or z > 1.0:
+                    continue
+                if x < 0 or x > viewport[2] or y < 0 or y > viewport[3]:
+                    continue
+
+                y = viewport[3] - y
+
+                hud.draw_text(x, y, planet.name, font, color=np.clip(np.divide((255,255,255), np.linalg.norm(np.subtract(pos,cam.position)) * 0.25), (0,0,0), (255,255,255)), center=True)
+
+            glEnable(GL_DEPTH_TEST)
         pygame.display.flip()
         pygame.display.set_caption(f"{int(clock.get_fps())} FPS; position: {cam.position}")
 
